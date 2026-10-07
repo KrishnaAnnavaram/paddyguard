@@ -1,0 +1,34 @@
+# secrets and local config
+.env
+.env.*
+!.env.example
+
+# local data: images, metadata, weather cache (never commit them)
+/data/*
+!/data/README.md
+/weather_cache/
+*.jpg
+*.jpeg
+*.png
+
+# models, runs, reports
+/runs/
+/outputs/
+*.pt
+*.pth
+*.h5
+*.keras
+*.joblib
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
