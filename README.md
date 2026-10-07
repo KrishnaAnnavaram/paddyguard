@@ -9,7 +9,7 @@
 ![Variants](https://img.shields.io/badge/Variants-image_%7C_weather_%7C_both-1F3864?style=for-the-badge)
 ![Augmentations](https://img.shields.io/badge/Augmentations-6_tested-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-7-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-42_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-36_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -110,7 +110,7 @@ paddyguard gives each of these questions its own component. Each component has a
 | Backbones | `tiny_cnn` (CPU), `efficientnet_v2_s`, `convnext_tiny` (torchvision) |
 | Offline mode | Synthetic images, offline weather, the CPU ablation and all tests. No download, no key, no GPU |
 | Safety | No constant weather. Field and duplicate groups never cross a split. Augmentation on training images only |
-| Tests | **42** unit tests (`pytest`). Without torch, the 6 torch tests skip |
+| Tests | **36** pass in CI (`.[dev]` only). The torch module (6 tests) skips there. With the `torch` extra, all 42 pass |
 
 ```mermaid
 flowchart LR
@@ -374,7 +374,7 @@ The `validate` command prints the number of near-duplicate groups with 2 or more
 6. After each epoch, measure the validation macro-F1. Keep the best checkpoint. Stop after 3 epochs with no improvement.
 7. Load the best checkpoint and evaluate once on `test`.
 
-`tiny_cnn` trains from scratch in one phase. It is for tests and CPU checks, not for a benchmark.
+`tiny_cnn` trains from random weights in one phase. It is for tests and CPU checks, not for a benchmark.
 
 ---
 
@@ -525,8 +525,7 @@ All numbers below come from this repository. The model numbers use **synthetic d
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests (local, Python 3.13 with torch) | **42 passed** | `pytest -q` |
-| Unit tests (clean venv with `.[dev]` only, as in CI) | **36 passed, 1 skipped** (the torch module skips) | `pip install -e ".[dev]" && pytest -q` |
+| Unit tests | CI installs only `.[dev]`: **36 passed**, 1 skipped (the torch module, `torch` extra). With the extras: 42 passed | `pytest -q` |
 | Metadata check (synthetic) | 750 images, 6 classes, 30 fields, 52 near-duplicate groups | `paddyguard validate` |
 
 CPU ablation on synthetic data, 3 seeds:
