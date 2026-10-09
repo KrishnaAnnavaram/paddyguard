@@ -69,6 +69,7 @@ This README is the **one location that explains all of paddyguard**. It gives th
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one image](#42-the-life-cycle-of-one-image)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Metadata and the class list](#5-metadata-and-the-class-list)
 6. 🌦️ [Weather features](#6-weather-features)
 7. 🟢 [Groups and splits](#7-groups-and-splits)
@@ -139,6 +140,47 @@ flowchart LR
 | Synthetic data | `src/paddyguard/synthetic.py` | Drawn leaves, fields, dates and a weather-driven class mix |
 | CLI | `src/paddyguard/cli.py` | `synth`, `validate`, `weather`, `ablation`, `train`, `augment-preview`, `demo` |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>paddyguard command"]
+    subgraph DATAIN["Data in"]
+        CFG["config.py<br/>Settings.from_env"]
+        META["metadata.py<br/>load_metadata, validate"]
+        WX["weather.py<br/>make_provider, build_features"]
+        SYN["synthetic.py<br/>generate"]
+    end
+    subgraph PREP["Images and splits"]
+        IMG["images.py<br/>load_rgb, image_features"]
+        AUG["augment.py<br/>AUGMENTATIONS, RandomWeather"]
+        SPL["splits.py<br/>duplicate_groups, assign_splits"]
+    end
+    subgraph MODELS["Models and metrics"]
+        BASE["baseline.py<br/>run_ablation"]
+        DEEP["deep.py<br/>train_deep, extra torch"]
+        EVA["evaluate.py<br/>metrics, bootstraps"]
+    end
+
+    CLI --> CFG
+    CLI --> META
+    CLI --> WX
+    CLI --> SYN
+    CLI --> SPL
+    CLI --> BASE
+    CLI --> DEEP
+    CLI -- "augment-preview" --> AUG
+    SYN --> WX
+    SPL --> IMG
+    BASE --> SPL
+    BASE --> IMG
+    BASE --> AUG
+    BASE --> EVA
+    DEEP --> IMG
+    DEEP --> AUG
+    DEEP --> EVA
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -192,6 +234,20 @@ The window ends one day before the photo date. The weather of the photo day and 
 
 `assign_splits` makes the test and validation splits from the original images. Augmentation runs inside the training data loader only. Thus no augmented copy of a training image can reach validation or test.
 
+```mermaid
+flowchart LR
+    IMG[/"Original images<br/>and split groups"/] --> AS["assign_splits<br/>seeded, grouped"]
+    AS --> TR["train"]
+    AS --> VA["val"]
+    AS --> TE["test"]
+    TR --> RW["RandomWeather, p 0.5<br/>torch training loader only"]
+    RW --> FIT["fit the model"]
+    VA --> SEL["select C or the best epoch<br/>no augmentation"]
+    TE --> EV[/"test metrics, once<br/>no augmentation"/]
+    FIT --> SEL
+    SEL --> EV
+```
+
 ### 3.4 Fields and near-duplicates stay together
 
 `split_groups` joins images that share a `field_id` or a near-duplicate link. `StratifiedGroupKFold` splits these groups. `assert_no_overlap` stops the run if a group crosses a split.
@@ -215,25 +271,72 @@ The Open-Meteo archive needs no key. paddyguard reads no API key, and `.env.exam
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    M["metadata.csv"] --> V["metadata.validate"]
-    I["images/"] --> V
+flowchart TD
+    M[/"metadata.csv"/] --> V["metadata.validate"]
+    I[/"images/"/] --> V
+    V -- "problem" --> ERR[/"MetadataError, exit 1"/]
     V --> DUP["splits.duplicate_groups"]
-    V --> WA{"location and date?"}
+    V --> WA{"location and date<br/>in every row?"}
     WA -->|"yes"| WF["weather.build_features (lagged window)"]
     WA -->|"no"| IO["image-only"]
-    WF --> CHK["assert_informative"]
+    CACHE[("weather_cache/<br/>offline or open-meteo")] --> WF
+    WF --> CHK{"assert_informative<br/>constant feature?"}
+    CHK -- "yes" --> STOP[/"ValueError, exit 1"/]
     DUP --> G["split_groups (field + duplicate)"]
     G --> S["assign_splits (seeded)"]
     S --> AB["baseline.run_ablation"]
     S --> DP["deep.train_deep"]
-    CHK --> AB
-    CHK --> DP
-    AB --> R["summary, paired comparison, robustness"]
-    DP --> RR["metrics.json, best.pt"]
+    CHK -- "no" --> AB
+    CHK -- "no" --> DP
+    IO --> AB
+    IO -- "fusion none only" --> DP
+    AB --> R[/"summary, paired comparison, robustness<br/>ablation JSON"/]
+    DP --> RR[("runs/<br/>metrics.json, best.pt")]
+    R --> HUMAN{{"HUMAN<br/>researcher reads the seeds, CIs and p-value"}}
+    RR --> HUMAN
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one image
+
+```mermaid
+stateDiagram-v2
+    state "Row in metadata.csv" as Row
+    state "Validated row" as Valid
+    state "Has 8 weather features" as Weather
+    state "Image only" as NoWeather
+    state "In a split group" as Grouped
+    state "In train" as Train
+    state "In val" as Val
+    state "In test" as Test
+    state "Augmented in memory" as Aug
+    state "Used to fit" as Fit
+    state "Used to select C or the best epoch" as Select
+    state "Predicted once" as Pred
+    [*] --> Row
+    Row --> MetadataError: column, range or file problem
+    Row --> Valid: validate
+    Valid --> Weather: build_features
+    Valid --> NoWeather: no location or date
+    Weather --> RunStopped: assert_informative finds a constant feature
+    Weather --> Grouped: duplicate_groups and split_groups
+    NoWeather --> Grouped: duplicate_groups and split_groups
+    Grouped --> Train: assign_splits
+    Grouped --> Val: assign_splits
+    Grouped --> Test: assign_splits
+    Train --> Aug: RandomWeather in the torch loader
+    Train --> Fit: no augmentation
+    Aug --> Fit
+    Val --> Select
+    Test --> Pred: each variant predicts its class
+    Fit --> [*]
+    Select --> [*]
+    Pred --> [*]
+    MetadataError --> [*]
+    RunStopped --> [*]
+```
 
 1. `validate` checks its `image_id`, label, file, location and date.
 2. `duplicate_groups` compares its thumbnail signature with the other images of its class.
@@ -243,11 +346,74 @@ flowchart TB
 6. If the image is in `train`, the loader can change it with one random augmentation.
 7. If the image is in `test`, each variant predicts its class once.
 
+### 4.3 Who does which step
+
+The sequence shows the `ablation` command on data with a location and a date for each image.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as paddyguard CLI
+    participant META as metadata.py
+    participant WX as weather.py
+    participant WC as weather_cache/
+    participant OM as Open-Meteo archive
+    participant SPL as splits.py
+    participant BASE as baseline.py
+    participant EVA as evaluate.py
+
+    R->>CLI: paddyguard ablation --data data/paddy
+    CLI->>CLI: Settings.from_env
+    CLI->>META: load_metadata, then validate
+    META-->>CLI: clean table
+    CLI->>META: weather_available
+    CLI->>WX: make_provider, build_features
+    loop each location
+        WX->>WC: read the CSV for the location and window
+        alt not in the cache
+            WX->>OM: GET daily weather (open-meteo provider)
+            OM-->>WX: daily JSON
+            WX->>WC: write the CSV
+        end
+    end
+    WX-->>CLI: 8 features for each image
+    CLI->>WX: assert_informative
+    CLI->>SPL: duplicate_groups, then split_groups
+    CLI->>BASE: run_ablation(meta, weather, groups, seeds)
+    loop each seed
+        BASE->>SPL: assign_splits(seed)
+        BASE->>BASE: fit_select for each variant
+        BASE->>EVA: metrics and group_bootstrap on test
+    end
+    BASE->>EVA: paired_bootstrap, first seed
+    BASE-->>CLI: AblationResult
+    CLI-->>R: summary lines and the ablation JSON
+```
+
 ---
 
 ## 5. Metadata and the class list
 
 **Purpose.** Make a clean metadata table and one fixed class list.
+
+```mermaid
+flowchart TD
+    IN[/"data folder"/] --> EX{"metadata.csv exists?"}
+    EX -- "no" --> FNF[/"FileNotFoundError"/]
+    EX -- "yes" --> REQ{"image_id and label<br/>columns present?"}
+    REQ -- "no" --> ERR[/"MetadataError<br/>list of problems"/]
+    REQ -- "yes" --> UID["Check that image_id is unique"]
+    UID --> DEF["Default path images/label/image_id<br/>default field_id = image_id"]
+    DEF --> DT["Parse date<br/>count rows with no valid date"]
+    DT --> RNG["Check latitude and longitude ranges"]
+    RNG --> FILES["Check that each image file exists"]
+    FILES --> ANY{"Any problem?"}
+    ANY -- "yes" --> ERR
+    ANY -- "no" --> OUT[/"Clean metadata table"/]
+    OUT --> CLS["classes_of<br/>sorted set of labels"]
+    OUT --> WAV["weather_available<br/>location and date in every row"]
+```
 
 | Input | Output |
 |---|---|
@@ -268,6 +434,28 @@ The class list is the sorted set of labels. It never depends on the order of a f
 ## 6. Weather features
 
 **Purpose.** Give each image the weather of its own place in the days before its photo.
+
+```mermaid
+flowchart TD
+    IN[/"Metadata with location and date"/] --> GRP["Group the images by location<br/>rounded to 3 decimals"]
+    GRP --> RANGE["Date range for the location<br/>first date minus lag to last date minus 1"]
+    RANGE --> HIT{"CSV in weather_cache/?"}
+    HIT -- "yes" --> READ["Read the cached daily rows"]
+    HIT -- "no" --> PROV{"Provider"}
+    PROV -- "offline" --> OFF["OfflineWeather<br/>synthetic climate"]
+    PROV -- "open-meteo" --> OM["OpenMeteoArchive<br/>archive API, no key"]
+    OFF --> WRITE[("weather_cache/<br/>one CSV for each request")]
+    OM --> WRITE
+    READ --> WIN["window_features for each image<br/>days date minus lag to date minus 1"]
+    WRITE --> WIN
+    WIN --> COV{"Half of the days<br/>or more present?"}
+    COV -- "no" --> NAN["8 features missing"]
+    COV -- "yes" --> F8["8 features"]
+    NAN --> CHK{"assert_informative<br/>constant column?"}
+    F8 --> CHK
+    CHK -- "yes" --> STOP[/"ValueError, run stops"/]
+    CHK -- "no" --> OUT[/"Weather feature table<br/>one row for each image"/]
+```
 
 | Input | Output |
 |---|---|
@@ -301,6 +489,25 @@ The class list is the sorted set of labels. It never depends on the order of a f
 
 **Purpose.** Make splits where no field and no near-duplicate shot crosses a split.
 
+```mermaid
+flowchart TD
+    IN[/"Validated metadata and images"/] --> ND{"--no-dedup?"}
+    ND -- "yes" --> FLD["Field groups only"]
+    ND -- "no" --> SIG["thumbnail_signature<br/>16 x 16 gray, mean 0, SD 1"]
+    SIG --> CMP["Compare each pair of the same class<br/>mean absolute difference"]
+    CMP --> NEAR{"0.06 or less?"}
+    NEAR -- "yes" --> JOIN["Join in one duplicate group<br/>union-find"]
+    NEAR -- "no" --> KEEP["Keep separate"]
+    JOIN --> MERGE["split_groups<br/>join duplicate groups with field_id"]
+    KEEP --> MERGE
+    FLD --> OUTER
+    MERGE --> OUTER["StratifiedGroupKFold, 5 folds<br/>1 fold is test"]
+    OUTER --> INNER["Second 5-fold split of the rest<br/>1 fold is val"]
+    INNER --> CHK{"assert_no_overlap<br/>group in 2 splits?"}
+    CHK -- "yes" --> LE[/"LeakageError"/]
+    CHK -- "no" --> OUT[/"train, val or test for each image"/]
+```
+
 **Procedure**
 
 1. Make a 16 × 16 gray thumbnail of each image, scaled to mean 0 and standard deviation 1.
@@ -315,6 +522,19 @@ The `validate` command prints the number of near-duplicate groups with 2 or more
 ---
 
 ## 8. Augmentations
+
+`RandomWeather` applies the augmentations in the torch training loader. Each call does these steps:
+
+```mermaid
+flowchart LR
+    IMG[/"Training image<br/>float32 RGB, 0 to 1"/] --> DRAW{"Random value<br/>less than p?"}
+    DRAW -- "no" --> SAME[/"Image unchanged"/]
+    DRAW -- "yes" --> PICK["Pick one name from AUGMENTATIONS<br/>fog, haze, rain, brightness, shadow, motion_blur"]
+    PICK --> CHK{"_check<br/>shape, float32, range"}
+    CHK -- "fail" --> ERR[/"ValueError or TypeError"/]
+    CHK -- "pass" --> APPLY["Apply to a new array<br/>input stays unchanged"]
+    APPLY --> OUT[/"Augmented image"/]
+```
 
 | Name | Change |
 |---|---|
@@ -332,6 +552,27 @@ The `validate` command prints the number of near-duplicate groups with 2 or more
 ## 9. The CPU ablation
 
 **Purpose.** Test if weather helps, with no deep learning framework.
+
+```mermaid
+flowchart TD
+    IN[/"Metadata, images, weather, groups, seeds"/] --> IF["extract_image_features<br/>31 values for each image"]
+    IF --> WQ{"Weather table?"}
+    WQ -- "no" --> V1["Variant image only"]
+    WQ -- "yes" --> V3["Variants image, weather,<br/>image+weather"]
+    V1 --> SEED["For each seed<br/>assign_splits"]
+    V3 --> SEED
+    SEED --> FS["fit_select for each variant<br/>impute, scale, balanced logistic regression"]
+    FS --> CG["Fit C = 0.1, 1, 10 on train<br/>select C by val macro-F1"]
+    CG --> REFIT["Refit on train + val"]
+    REFIT --> TEST["Predict test once<br/>metrics, group_bootstrap"]
+    TEST --> FIRST{"First seed?"}
+    FIRST -- "yes, weather present" --> PAIR["paired_bootstrap<br/>image+weather minus image"]
+    FIRST -- "yes" --> ROB["Robustness: image model<br/>on each augmented test set"]
+    TEST --> SUM["seed_summary<br/>mean and SD of macro-F1"]
+    PAIR --> OUT[/"AblationResult<br/>ablation JSON with --out"/]
+    ROB --> OUT
+    SUM --> OUT
+```
 
 | Input | Output |
 |---|---|
@@ -358,6 +599,30 @@ The `validate` command prints the number of near-duplicate groups with 2 or more
 
 **Purpose.** Train a backbone with or without weather fusion.
 
+```mermaid
+flowchart TD
+    IN[/"Metadata, split, weather features"/] --> FQ{"fusion none?"}
+    FQ -- "no" --> STD["standardize<br/>train mean and SD, fill with train mean"]
+    FQ -- "yes" --> DS
+    STD --> DS["PaddyDataset<br/>stream load_rgb, RandomWeather on train only,<br/>then ImageNet normalization"]
+    DS --> NET["build_backbone and FusionNet<br/>none, late or film"]
+    NET --> LOSS["Class-weighted cross-entropy"]
+    LOSS --> PH{"Pretrained, not tiny_cnn,<br/>epoch less than head_epochs?"}
+    PH -- "yes" --> HEAD["Frozen backbone, head only<br/>lr 1e-3"]
+    PH -- "no" --> ALL["All layers<br/>lr 1e-4, or 1e-3 in one-phase mode"]
+    HEAD --> VAL["Validation macro-F1"]
+    ALL --> VAL
+    VAL --> BEST{"Better than the best?"}
+    BEST -- "yes" --> CK[("best.pt")]
+    BEST -- "no" --> PAT{"3 epochs with no gain<br/>and backbone not frozen?"}
+    CK --> MORE{"Epochs left?"}
+    PAT -- "no" --> MORE
+    MORE -- "yes" --> PH
+    PAT -- "yes" --> LOAD["Load best.pt<br/>predict test once"]
+    MORE -- "no" --> LOAD
+    LOAD --> OUT[/"metrics.json, config.json,<br/>test_proba.npy"/]
+```
+
 | Fusion | Method |
 |---|---|
 | `none` | Image features → dropout → linear head |
@@ -380,6 +645,19 @@ The `validate` command prints the number of near-duplicate groups with 2 or more
 
 ## 11. Metrics and comparisons
 
+`evaluate.py` gives the metrics of one test split, the group intervals and the paired comparison.
+
+```mermaid
+flowchart LR
+    Y[/"Test labels and probabilities"/] --> M["metrics<br/>macro_f1, balanced_accuracy,<br/>recall, confusion_matrix, ece"]
+    Y --> GB["group_bootstrap<br/>resample whole split groups"]
+    GB --> CI[/"macro_f1_ci, 95%"/]
+    TWO[/"Probabilities of two variants<br/>on the same test images"/] --> PB["paired_bootstrap<br/>same group draw for both"]
+    PB --> D[/"delta, 95% CI, p-value"/]
+    SEEDS[/"Macro-F1 of each seed"/] --> SS["seed_summary"]
+    SS --> MS[/"mean and SD"/]
+```
+
 | Metric | Meaning |
 |---|---|
 | `macro_f1` | Mean F1 over the classes in the test split. The main metric |
@@ -394,6 +672,30 @@ The `validate` command prints the number of near-duplicate groups with 2 or more
 ---
 
 ## 12. The decision rules
+
+The map shows the step where each fixed value applies.
+
+```mermaid
+flowchart LR
+    subgraph WXR["weather.py"]
+        W1["Window: 14 days<br/>before the photo date"] --> W2["Coverage: half of the days"]
+        W2 --> W3["Rainy day: 1 mm or more<br/>humid day: 90% or more"]
+    end
+    subgraph SPR["splits.py"]
+        S1["Near-duplicate: 0.06"] --> S2["Test: 1 of 5 folds<br/>val: 1 of 5 folds of the rest"]
+    end
+    subgraph CPU["baseline.py"]
+        C1["C grid: 0.1, 1, 10"]
+    end
+    subgraph TOR["deep.py DeepConfig"]
+        T1["augment_p 0.5"] --> T2["head_epochs 3, finetune_lr 1e-4"]
+        T2 --> T3["patience 3"]
+    end
+    W3 --> C1
+    W3 --> T1
+    S2 --> C1
+    S2 --> T1
+```
 
 | Value | Where | Number |
 |---|---|---|
@@ -456,7 +758,20 @@ Offline demo (synthetic data, CPU, about 20 seconds):
 paddyguard demo
 ```
 
-Step by step:
+Step by step. The commands run in this sequence:
+
+```mermaid
+flowchart LR
+    SYN["paddyguard synth"] --> D[("data/synthetic/<br/>metadata.csv, images/")]
+    REAL[/"data/paddy/<br/>your images"/] --> VAL
+    D --> VAL["validate"]
+    VAL --> WX["weather<br/>optional"]
+    VAL --> AB["ablation"]
+    VAL --> TR["train<br/>torch extra"]
+    WX --> F[("runs/weather_features.csv")]
+    AB --> J[("runs/ablation.json")]
+    TR --> R[("runs/backbone_fusion_seedN/")]
+```
 
 ```bash
 paddyguard synth --out data/synthetic --fields 30 --photos 25 --seed 0
